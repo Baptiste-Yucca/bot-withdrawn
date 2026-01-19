@@ -1,0 +1,20 @@
+{
+  "name": "bot-withdrawn",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@types/node": "^25.0.9",
+    "dotenv": "^17.2.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "viem": "^2.44.4"
+  }
+}
