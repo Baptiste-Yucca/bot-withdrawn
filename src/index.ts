@@ -19,6 +19,9 @@ function getUserAddress(): Address | null {
 
 const USER_ADDR = getUserAddress();
 
+const initialBalances: Record<Address, bigint> = {};
+const poolLiquidity: Record<Address, bigint> = {};
+
 const client = createPublicClient({
   chain: gnosis,
   transport: http(),
@@ -32,8 +35,14 @@ function formatAmount(amount: bigint, reserve: Address): string {
   return `${amount.toString()} (token inconnu: ${reserve})`;
 }
 
+function isStablecoin(reserve: Address): boolean {
+  return reserve in TOKENS;
+}
+
 function logRepayEvent(log: Log<bigint, number, false, typeof REPAY_EVENT_ABI[0], true>) {
   const { reserve, user, repayer, amount } = log.args;
+  if (!isStablecoin(reserve)) return;
+
   const formattedAmount = formatAmount(amount, reserve);
 
   console.log("---");
@@ -46,6 +55,8 @@ function logRepayEvent(log: Log<bigint, number, false, typeof REPAY_EVENT_ABI[0]
 
 function logSupplyEvent(log: Log<bigint, number, false, typeof SUPPLY_EVENT_ABI[0], true>) {
   const { reserve, user, onBehalfOf, amount } = log.args;
+  if (!isStablecoin(reserve)) return;
+
   const formattedAmount = formatAmount(amount, reserve);
 
   console.log("---");
@@ -56,8 +67,8 @@ function logSupplyEvent(log: Log<bigint, number, false, typeof SUPPLY_EVENT_ABI[
   console.log(`  OnBehalfOf: ${onBehalfOf}`);
 }
 
-async function fetchSupplyTokenBalances(address: Address) {
-  console.log(`Balances des Supply Tokens pour ${address}:`);
+async function fetchAndStoreSupplyTokenBalances(address: Address) {
+  console.log(`Balances initiales des Supply Tokens pour ${address}:`);
 
   for (const [tokenAddress, token] of Object.entries(SUPPLY_TOKENS)) {
     try {
@@ -67,10 +78,33 @@ async function fetchSupplyTokenBalances(address: Address) {
         functionName: "balanceOf",
         args: [address],
       });
+      initialBalances[tokenAddress as Address] = balance;
       const formattedBalance = formatUnits(balance, token.decimals);
       console.log(`  ${token.symbol}: ${formattedBalance}`);
     } catch (error) {
       console.error(`  Erreur lecture ${token.symbol}:`, (error as Error).message);
+    }
+  }
+  console.log("---");
+}
+
+async function fetchAndStorePoolLiquidity() {
+  console.log("Liquidite disponible dans les pools:");
+
+  for (const [supplyTokenAddress, supplyToken] of Object.entries(SUPPLY_TOKENS)) {
+    const stablecoin = TOKENS[supplyToken.associatedReserve];
+    try {
+      const balance = await client.readContract({
+        address: supplyToken.associatedReserve,
+        abi: ERC20_BALANCE_OF_ABI,
+        functionName: "balanceOf",
+        args: [supplyTokenAddress as Address],
+      });
+      poolLiquidity[supplyToken.associatedReserve] = balance;
+      const formattedBalance = formatUnits(balance, stablecoin.decimals);
+      console.log(`  ${stablecoin.symbol} dans ${supplyToken.symbol}: ${formattedBalance}`);
+    } catch (error) {
+      console.error(`  Erreur lecture liquidite ${stablecoin.symbol}:`, (error as Error).message);
     }
   }
   console.log("---");
@@ -100,12 +134,12 @@ async function watchRMMEvents() {
 
 async function main() {
   if (USER_ADDR) {
-    await fetchSupplyTokenBalances(USER_ADDR);
+    await fetchAndStoreSupplyTokenBalances(USER_ADDR);
   } else if (process.env.PRIVATE_KEY) {
     console.log("Cle privee invalide, impossible de deriver l'adresse");
     console.log("---");
   }
-
+  await fetchAndStorePoolLiquidity();
   watchRMMEvents();
 }
 
