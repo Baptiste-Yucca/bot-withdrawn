@@ -1,23 +1,23 @@
 import "dotenv/config";
-import { createPublicClient, http, formatUnits, type Address, type Log } from "viem";
+import { createPublicClient, createWalletClient, http, formatUnits, type Address, type Log } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { gnosis } from "viem/chains";
-import { RMM_ADDRESS, TOKENS, SUPPLY_TOKENS, REPAY_EVENT_ABI, SUPPLY_EVENT_ABI, ERC20_BALANCE_OF_ABI } from "./config.js";
+import { RMM_ADDRESS, TOKENS, SUPPLY_TOKENS, REPAY_EVENT_ABI, SUPPLY_EVENT_ABI, ERC20_BALANCE_OF_ABI, WITHDRAW_ABI } from "./config.js";
 
-function getUserAddress(): Address | null {
+function getAccount() {
   const privateKey = process.env.PRIVATE_KEY;
   if (!privateKey) return null;
 
   try {
     const formattedKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
-    const account = privateKeyToAccount(formattedKey as `0x${string}`);
-    return account.address;
+    return privateKeyToAccount(formattedKey as `0x${string}`);
   } catch {
     return null;
   }
 }
 
-const USER_ADDR = getUserAddress();
+const account = getAccount();
+const USER_ADDR = account?.address ?? null;
 
 const initialBalances: Record<Address, bigint> = {};
 const poolLiquidity: Record<Address, bigint> = {};
@@ -26,6 +26,14 @@ const client = createPublicClient({
   chain: gnosis,
   transport: http(),
 });
+
+const walletClient = account
+  ? createWalletClient({
+      account,
+      chain: gnosis,
+      transport: http(),
+    })
+  : null;
 
 function formatAmount(amount: bigint, reserve: Address): string {
   const token = TOKENS[reserve];
@@ -39,32 +47,46 @@ function isStablecoin(reserve: Address): boolean {
   return reserve in TOKENS;
 }
 
-function logRepayEvent(log: Log<bigint, number, false, typeof REPAY_EVENT_ABI[0], true>) {
-  const { reserve, user, repayer, amount } = log.args;
+async function refreshAndWithdraw(): Promise<void> {
+  if (!USER_ADDR) return;
+
+  // Rafraichir les balances et liquidites
+  await fetchAndStoreSupplyTokenBalances(USER_ADDR);
+  await fetchAndStorePoolLiquidity();
+  // Tenter le withdraw
+  await withdrawAllAvailable();
+}
+
+async function handleRepayEvent(reserve: Address, user: Address, repayer: Address, amount: bigint, blockNumber: bigint | null) {
   if (!isStablecoin(reserve)) return;
 
   const formattedAmount = formatAmount(amount, reserve);
 
   console.log("---");
-  console.log(`[Repay] Bloc: ${log.blockNumber}`);
+  console.log(`[Repay] Bloc: ${blockNumber}`);
   console.log(`  Token: ${reserve}`);
   console.log(`  Montant: ${formattedAmount}`);
   console.log(`  User: ${user}`);
   console.log(`  Repayer: ${repayer}`);
+
+  // Un repay a libere de la liquidite, tenter un withdraw
+  await refreshAndWithdraw();
 }
 
-function logSupplyEvent(log: Log<bigint, number, false, typeof SUPPLY_EVENT_ABI[0], true>) {
-  const { reserve, user, onBehalfOf, amount } = log.args;
+async function handleSupplyEvent(reserve: Address, user: Address, onBehalfOf: Address, amount: bigint, blockNumber: bigint | null) {
   if (!isStablecoin(reserve)) return;
 
   const formattedAmount = formatAmount(amount, reserve);
 
   console.log("---");
-  console.log(`[Supply] Bloc: ${log.blockNumber}`);
+  console.log(`[Supply] Bloc: ${blockNumber}`);
   console.log(`  Token: ${reserve}`);
   console.log(`  Montant: ${formattedAmount}`);
   console.log(`  User: ${user}`);
   console.log(`  OnBehalfOf: ${onBehalfOf}`);
+
+  // Un supply a ajoute de la liquidite, tenter un withdraw
+  await refreshAndWithdraw();
 }
 
 async function fetchAndStoreSupplyTokenBalances(address: Address) {
@@ -93,6 +115,8 @@ async function fetchAndStorePoolLiquidity() {
 
   for (const [supplyTokenAddress, supplyToken] of Object.entries(SUPPLY_TOKENS)) {
     const stablecoin = TOKENS[supplyToken.associatedReserve];
+    if (!stablecoin) continue;
+
     try {
       const balance = await client.readContract({
         address: supplyToken.associatedReserve,
@@ -110,6 +134,96 @@ async function fetchAndStorePoolLiquidity() {
   console.log("---");
 }
 
+function calculateWithdrawAmount(userBalance: bigint, poolLiquidity: bigint): bigint {
+  // Retourne le minimum entre la balance user et la liquidite disponible
+  return userBalance <= poolLiquidity ? userBalance : poolLiquidity;
+}
+
+async function executeWithdraw(
+  supplyTokenAddress: Address,
+  reserveAddress: Address,
+  amount: bigint
+): Promise<boolean> {
+  if (!walletClient || !USER_ADDR) {
+    console.error("Wallet non configure, impossible d'executer le withdraw");
+    return false;
+  }
+
+  const supplyToken = SUPPLY_TOKENS[supplyTokenAddress];
+  const stablecoin = TOKENS[reserveAddress];
+
+  if (!supplyToken || !stablecoin) {
+    console.error("Token non trouve");
+    return false;
+  }
+
+  try {
+    const amountDisplay = formatUnits(amount, stablecoin.decimals);
+
+    console.log(`[Withdraw] Execution pour ${supplyToken.symbol}...`);
+    console.log(`  Reserve: ${stablecoin.symbol}`);
+    console.log(`  Montant: ${amountDisplay}`);
+
+    const hash = await walletClient.writeContract({
+      address: RMM_ADDRESS,
+      abi: WITHDRAW_ABI,
+      functionName: "withdraw",
+      args: [reserveAddress, amount, USER_ADDR],
+    });
+
+    console.log(`  Transaction envoyee: ${hash}`);
+
+    const receipt = await client.waitForTransactionReceipt({ hash });
+    console.log(`  Transaction confirmee dans le bloc ${receipt.blockNumber}`);
+    console.log(`  Status: ${receipt.status === "success" ? "Succes" : "Echec"}`);
+
+    return receipt.status === "success";
+  } catch (error) {
+    console.error(`  Erreur withdraw ${supplyToken.symbol}:`, (error as Error).message);
+    return false;
+  }
+}
+
+async function withdrawAllAvailable(): Promise<void> {
+  if (!USER_ADDR) {
+    console.log("Pas d'adresse utilisateur, skip withdraw");
+    return;
+  }
+
+  console.log("---");
+  console.log("[Withdraw] Verification des positions a retirer...");
+
+  for (const [supplyTokenAddress, supplyToken] of Object.entries(SUPPLY_TOKENS)) {
+    const userBalance = initialBalances[supplyTokenAddress as Address] ?? 0n;
+    const liquidity = poolLiquidity[supplyToken.associatedReserve] ?? 0n;
+    const stablecoin = TOKENS[supplyToken.associatedReserve];
+
+    if (!stablecoin) continue;
+
+    if (userBalance === 0n) {
+      console.log(`  ${supplyToken.symbol}: Pas de position`);
+      continue;
+    }
+
+    if (liquidity === 0n) {
+      console.log(`  ${supplyToken.symbol}: Pas de liquidite disponible`);
+      continue;
+    }
+
+    const withdrawAmount = calculateWithdrawAmount(userBalance, liquidity);
+
+    console.log(`  ${supplyToken.symbol}: Balance ${formatUnits(userBalance, supplyToken.decimals)}, Liquidite ${formatUnits(liquidity, stablecoin.decimals)}`);
+    console.log(`    -> Retrait: ${formatUnits(withdrawAmount, stablecoin.decimals)} ${stablecoin.symbol}`);
+
+    await executeWithdraw(
+      supplyTokenAddress as Address,
+      supplyToken.associatedReserve,
+      withdrawAmount
+    );
+  }
+  console.log("---");
+}
+
 async function watchRMMEvents() {
   console.log(`Ecoute des evenements Repay et Supply sur RMM (${RMM_ADDRESS})...`);
   console.log(`Chain: Gnosis (${gnosis.id})`);
@@ -119,7 +233,14 @@ async function watchRMMEvents() {
     address: RMM_ADDRESS,
     abi: REPAY_EVENT_ABI,
     eventName: "Repay",
-    onLogs: (logs) => logs.forEach(logRepayEvent),
+    onLogs: (logs) => {
+      for (const log of logs) {
+        const { reserve, user, repayer, amount } = log.args;
+        if (reserve && user && repayer && amount !== undefined) {
+          handleRepayEvent(reserve, user, repayer, amount, log.blockNumber);
+        }
+      }
+    },
     onError: (error) => console.error("Erreur Repay:", error.message),
   });
 
@@ -127,7 +248,14 @@ async function watchRMMEvents() {
     address: RMM_ADDRESS,
     abi: SUPPLY_EVENT_ABI,
     eventName: "Supply",
-    onLogs: (logs) => logs.forEach(logSupplyEvent),
+    onLogs: (logs) => {
+      for (const log of logs) {
+        const { reserve, user, onBehalfOf, amount } = log.args;
+        if (reserve && user && onBehalfOf && amount !== undefined) {
+          handleSupplyEvent(reserve, user, onBehalfOf, amount, log.blockNumber);
+        }
+      }
+    },
     onError: (error) => console.error("Erreur Supply:", error.message),
   });
 }
@@ -140,6 +268,12 @@ async function main() {
     console.log("---");
   }
   await fetchAndStorePoolLiquidity();
+
+  // Tenter un withdraw au demarrage si l'user a des positions
+  if (USER_ADDR && walletClient) {
+    await withdrawAllAvailable();
+  }
+
   watchRMMEvents();
 }
 

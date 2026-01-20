@@ -8,10 +8,10 @@ export const TOKENS: Record<Address, { symbol: string; decimals: number }> = {
   "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83": { symbol: "USDC", decimals: 6 },
 };
 
-// supply tokens associated to stablecoins
+// supply tokens (aTokens) associated to stablecoins
 export const SUPPLY_TOKENS: Record<Address, { symbol: string; decimals: number; associatedReserve: Address }> = {
-  "0x9908801dF7902675C3FEDD6Fea0294D18D5d5d34": { symbol: "sWXDAI", decimals: 18, associatedReserve: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d" },
-  "0xeD56F76E9cBC6A64b821e9c016eAFbd3db5436D1": { symbol: "sUSDC", decimals: 6, associatedReserve: "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83" },
+  "0x0cA4f5554Dd9Da6217d62D8df2816c82bba4157b": { symbol: "aRMMv3WXDAI", decimals: 18, associatedReserve: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d" },
+  "0xeD56F76E9cBC6A64b821e9c016eAFbd3db5436D1": { symbol: "aRMMv3USDC", decimals: 6, associatedReserve: "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83" },
 };
 
 export const REPAY_EVENT_ABI = [
@@ -53,3 +53,19 @@ export const ERC20_BALANCE_OF_ABI = [
     type: "function",
   },
 ] as const;
+
+export const WITHDRAW_ABI = [
+  {
+    inputs: [
+      { name: "asset", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "to", type: "address" },
+    ],
+    name: "withdraw",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+export const MAX_UINT256 = 2n ** 256n - 1n;
