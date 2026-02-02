@@ -3,10 +3,11 @@ import { createPublicClient, createWalletClient, http, formatUnits, parseUnits, 
 import { privateKeyToAccount } from "viem/accounts";
 import { gnosis } from "viem/chains";
 import { isAddress } from "viem";
-import { RMM_ADDRESS, TOKENS, SUPPLY_TOKENS, REPAY_EVENT_ABI, SUPPLY_EVENT_ABI, ERC20_BALANCE_OF_ABI, WITHDRAW_ABI, ERC20_TRANSFER_ABI } from "./config.js";
+import { RMM_ADDRESS, TOKENS, SUPPLY_TOKENS, REPAY_EVENT_ABI, SUPPLY_EVENT_ABI, WITHDRAW_EVENT_ABI, ERC20_BALANCE_OF_ABI, WITHDRAW_ABI, ERC20_TRANSFER_ABI } from "./config.js";
 
 // Withdraw configuration from ENV
 const MIN_WITHDRAW_USD = parseFloat(process.env.MIN_WITHDRAW_USD ?? "0.01");
+const REFRESH_INTERVAL_MIN = parseFloat(process.env.REFRESH_INTERVAL_MIN ?? "5");
 
 // Gas configuration from ENV (USD-based strategy)
 // gasPrice is computed so that: gasPrice × gasLimit ≤ GAS_MAX_COST_USD
@@ -112,6 +113,28 @@ async function handleSupplyEvent(reserve: Address, user: Address, onBehalfOf: Ad
   console.log(`  Liquidite ${TOKENS[reserve]?.symbol}: ${formatAmount(poolLiquidity[reserve], reserve)}`);
 
   await tryWithdraw();
+}
+
+function handleWithdrawEvent(reserve: Address, user: Address, to: Address, amount: bigint, blockNumber: bigint | null) {
+  if (!isStablecoin(reserve)) return;
+
+  // Ignorer nos propres withdraws (deja geres localement dans executeWithdraw)
+  if (USER_ADDR && (user.toLowerCase() === USER_ADDR.toLowerCase())) {
+    return;
+  }
+
+  const formattedAmount = formatAmount(amount, reserve);
+
+  console.log("---");
+  console.log(`[Withdraw] Bloc: ${blockNumber}`);
+  console.log(`  Token: ${reserve}`);
+  console.log(`  Montant: ${formattedAmount}`);
+  console.log(`  User: ${user}`);
+
+  // Mise a jour locale de la liquidite (-amount car withdraw retire de la liquidite)
+  const before = poolLiquidity[reserve] ?? 0n;
+  poolLiquidity[reserve] = before > amount ? before - amount : 0n;
+  console.log(`  Liquidite ${TOKENS[reserve]?.symbol}: ${formatAmount(poolLiquidity[reserve], reserve)}`);
 }
 
 async function fetchAndStoreSupplyTokenBalances(address: Address) {
@@ -365,7 +388,7 @@ async function withdrawAllAvailable(): Promise<void> {
 }
 
 async function watchRMMEvents() {
-  console.log(`Ecoute des evenements Repay et Supply sur RMM (${RMM_ADDRESS})...`);
+  console.log(`Ecoute des evenements Repay, Supply et Withdraw sur RMM (${RMM_ADDRESS})...`);
   console.log(`Chain: Gnosis (${gnosis.id})`);
   console.log("---");
 
@@ -398,11 +421,27 @@ async function watchRMMEvents() {
     },
     onError: (error) => console.error("Erreur Supply:", error.message),
   });
+
+  client.watchContractEvent({
+    address: RMM_ADDRESS,
+    abi: WITHDRAW_EVENT_ABI,
+    eventName: "Withdraw",
+    onLogs: (logs) => {
+      for (const log of logs) {
+        const { reserve, user, to, amount } = log.args;
+        if (reserve && user && to && amount !== undefined) {
+          handleWithdrawEvent(reserve, user, to, amount, log.blockNumber);
+        }
+      }
+    },
+    onError: (error) => console.error("Erreur Withdraw:", error.message),
+  });
 }
 
 function displayConfig() {
   console.log("Configuration:");
   console.log(`  Min withdraw:        ${MIN_WITHDRAW_USD} $`);
+  console.log(`  Refresh interval:    ${REFRESH_INTERVAL_MIN} min`);
   console.log(`  Withdraw gas limit:  ${GAS_LIMIT_WITHDRAW}`);
   console.log(`  Withdraw max cost:   ${GAS_MAX_COST_USD} $`);
   console.log(`  Min gas price:       ${GAS_MIN_PRICE_GWEI} Gwei`);
@@ -430,6 +469,16 @@ async function main() {
   }
 
   watchRMMEvents();
+
+  // Refresh periodique des balances aToken pour avoir des donnees fiables
+  if (USER_ADDR && REFRESH_INTERVAL_MIN > 0) {
+    const intervalMs = REFRESH_INTERVAL_MIN * 60 * 1000;
+    setInterval(async () => {
+      console.log("---");
+      console.log("[Refresh] Mise a jour periodique des balances...");
+      await fetchAndStoreSupplyTokenBalances(USER_ADDR);
+    }, intervalMs);
+  }
 }
 
 main();

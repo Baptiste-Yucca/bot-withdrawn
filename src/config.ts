@@ -44,6 +44,20 @@ export const SUPPLY_EVENT_ABI = [
   },
 ] as const;
 
+export const WITHDRAW_EVENT_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "reserve", type: "address" },
+      { indexed: true, name: "user", type: "address" },
+      { indexed: true, name: "to", type: "address" },
+      { indexed: false, name: "amount", type: "uint256" },
+    ],
+    name: "Withdraw",
+    type: "event",
+  },
+] as const;
+
 export const ERC20_BALANCE_OF_ABI = [
   {
     inputs: [{ name: "account", type: "address" }],
