@@ -8,10 +8,14 @@ import { RMM_ADDRESS, TOKENS, SUPPLY_TOKENS, REPAY_EVENT_ABI, SUPPLY_EVENT_ABI, 
 // Withdraw configuration from ENV
 const MIN_WITHDRAW_USD = parseFloat(process.env.MIN_WITHDRAW_USD ?? "0.01");
 
-// Gas configuration from ENV
-const GAS_PRICE_GWEI = parseFloat(process.env.GAS_PRICE_GWEI ?? "2");
-const GAS_MAX_COST_USD = parseFloat(process.env.GAS_MAX_COST_USD ?? "0"); // 0 = no limit
-const GAS_TRANSFER_DEST_GWEI = parseFloat(process.env.GAS_TRANSFER_DEST_GWEI ?? "2");
+// Gas configuration from ENV (USD-based strategy)
+// gasPrice is computed so that: gasPrice × gasLimit ≤ GAS_MAX_COST_USD
+const GAS_LIMIT_WITHDRAW = BigInt(process.env.GAS_LIMIT_WITHDRAW ?? "300000");
+const GAS_MAX_COST_USD = parseFloat(process.env.GAS_MAX_COST_USD ?? "0.01");
+const GAS_MIN_PRICE_GWEI = parseFloat(process.env.GAS_MIN_PRICE_GWEI ?? "1"); // Skip if derived price < min
+
+// Transfer config (simple Gwei-based)
+const GAS_TRANSFER_PRICE_GWEI = parseFloat(process.env.GAS_TRANSFER_PRICE_GWEI ?? "1");
 
 // Destination address for forwarding withdrawn funds (optional)
 const DEST_ADDRESS: Address | null = (() => {
@@ -37,7 +41,8 @@ function getAccount() {
 const account = getAccount();
 const USER_ADDR = account?.address ?? null;
 
-const initialBalances: Record<Address, bigint> = {};
+// Balances suivies localement (fetch 1x au demarrage, puis mises a jour apres withdraw)
+const userBalances: Record<Address, bigint> = {};
 const poolLiquidity: Record<Address, bigint> = {};
 
 const client = createPublicClient({
@@ -65,13 +70,9 @@ function isStablecoin(reserve: Address): boolean {
   return reserve in TOKENS;
 }
 
-async function refreshAndWithdraw(): Promise<void> {
+async function tryWithdraw(): Promise<void> {
   if (!USER_ADDR) return;
-
-  // Rafraichir les balances et liquidites
-  await fetchAndStoreSupplyTokenBalances(USER_ADDR);
-  await fetchAndStorePoolLiquidity();
-  // Tenter le withdraw
+  // Pas de fetch RPC - on utilise les balances suivies localement
   await withdrawAllAvailable();
 }
 
@@ -87,8 +88,11 @@ async function handleRepayEvent(reserve: Address, user: Address, repayer: Addres
   console.log(`  User: ${user}`);
   console.log(`  Repayer: ${repayer}`);
 
-  // Un repay a libere de la liquidite, tenter un withdraw
-  await refreshAndWithdraw();
+  // Mise a jour locale de la liquidite (+amount car repay ajoute de la liquidite)
+  poolLiquidity[reserve] = (poolLiquidity[reserve] ?? 0n) + amount;
+  console.log(`  Liquidite ${TOKENS[reserve]?.symbol}: ${formatAmount(poolLiquidity[reserve], reserve)}`);
+
+  await tryWithdraw();
 }
 
 async function handleSupplyEvent(reserve: Address, user: Address, onBehalfOf: Address, amount: bigint, blockNumber: bigint | null) {
@@ -103,12 +107,15 @@ async function handleSupplyEvent(reserve: Address, user: Address, onBehalfOf: Ad
   console.log(`  User: ${user}`);
   console.log(`  OnBehalfOf: ${onBehalfOf}`);
 
-  // Un supply a ajoute de la liquidite, tenter un withdraw
-  await refreshAndWithdraw();
+  // Mise a jour locale de la liquidite (+amount car supply ajoute de la liquidite)
+  poolLiquidity[reserve] = (poolLiquidity[reserve] ?? 0n) + amount;
+  console.log(`  Liquidite ${TOKENS[reserve]?.symbol}: ${formatAmount(poolLiquidity[reserve], reserve)}`);
+
+  await tryWithdraw();
 }
 
 async function fetchAndStoreSupplyTokenBalances(address: Address) {
-  console.log(`Balances initiales des Supply Tokens pour ${address}:`);
+  console.log(`Balances des Supply Tokens pour ${address}:`);
 
   for (const [tokenAddress, token] of Object.entries(SUPPLY_TOKENS)) {
     try {
@@ -118,7 +125,7 @@ async function fetchAndStoreSupplyTokenBalances(address: Address) {
         functionName: "balanceOf",
         args: [address],
       });
-      initialBalances[tokenAddress as Address] = balance;
+      userBalances[tokenAddress as Address] = balance;
       const formattedBalance = formatUnits(balance, token.decimals);
       console.log(`  ${token.symbol}: ${formattedBalance}`);
     } catch (error) {
@@ -171,57 +178,34 @@ function checkMinWithdrawAmount(amount: bigint, decimals: number): boolean {
 }
 
 /**
- * Calculate gas parameters for withdraw transaction.
- * Returns:
- * - GasParams object with configured gas price
- * - null if withdraw should be skipped (gas cost exceeds limit)
- *
- * Configuration (ENV):
- * - GAS_PRICE_GWEI: Gas price in Gwei (default 2)
- * - GAS_MAX_COST_USD: Max gas cost in USD/xDAI, skip if exceeded (0 = no limit)
+ * Calculate gas parameters using USD-based strategy.
+ * gasPrice is derived from: gasPrice = maxCostUSD / gasLimit
+ * Skip if derived gasPrice < GAS_MIN_PRICE_GWEI (tx wouldn't be accepted)
  */
-async function calculateGasParams(
-  reserveAddress: Address,
-  amount: bigint
-): Promise<{ gasPrice: bigint; gas: bigint } | null> {
-  if (!USER_ADDR) return null;
+function calculateGasParamsFromUSD(
+  maxCostUSD: number,
+  gasLimit: bigint,
+  minPriceGwei: number
+): { gasPrice: bigint; gas: bigint } | null {
+  // maxCostWei = maxCostUSD * 10^18 (xDAI has 18 decimals)
+  const maxCostWei = parseUnits(maxCostUSD.toString(), 18);
 
-  try {
-    const gasPrice = parseUnits(GAS_PRICE_GWEI.toString(), 9);
+  // gasPrice = maxCostWei / gasLimit
+  const gasPrice = maxCostWei / gasLimit;
 
-    // Estimate gas limit
-    const gasEstimate = await client.estimateContractGas({
-      address: RMM_ADDRESS,
-      abi: WITHDRAW_ABI,
-      functionName: "withdraw",
-      args: [reserveAddress, amount, USER_ADDR],
-      account: USER_ADDR,
-    });
+  // Check against minimum acceptable gas price
+  const minPriceWei = parseUnits(minPriceGwei.toString(), 9);
+  const gasPriceGwei = parseFloat(formatUnits(gasPrice, 9));
 
-    // Add 20% buffer to gas estimate for safety
-    const gasLimit = (gasEstimate * 120n) / 100n;
+  console.log(`  [Gas] Limit: ${gasLimit}, Max cost: ${maxCostUSD} USD`);
+  console.log(`  [Gas] Derived price: ${gasPriceGwei.toFixed(4)} Gwei (min: ${minPriceGwei} Gwei)`);
 
-    // Calculate estimated gas cost in xDAI (18 decimals, ~1 USD)
-    const gasCostWei = gasLimit * gasPrice;
-    const gasCostUSD = parseFloat(formatUnits(gasCostWei, 18));
-
-    console.log(`  [Gas] Price: ${GAS_PRICE_GWEI} Gwei, Estimate: ${gasEstimate}, Limit: ${gasLimit}`);
-    console.log(`  [Gas] Cout estime: ${gasCostUSD.toFixed(6)} xDAI`);
-
-    // Check against max cost limit if set
-    if (GAS_MAX_COST_USD > 0 && gasCostUSD > GAS_MAX_COST_USD) {
-      console.log(`  [SKIP] Frais de gas (${gasCostUSD.toFixed(6)} xDAI) > limite (${GAS_MAX_COST_USD} USD)`);
-      return null;
-    }
-
-    return {
-      gasPrice,
-      gas: gasLimit,
-    };
-  } catch (error) {
-    console.error(`  Erreur calcul gas:`, (error as Error).message);
+  if (gasPrice < minPriceWei) {
+    console.log(`  [SKIP] Gas price (${gasPriceGwei.toFixed(4)} Gwei) < minimum (${minPriceGwei} Gwei)`);
     return null;
   }
+
+  return { gasPrice, gas: gasLimit };
 }
 
 async function executeWithdraw(
@@ -254,8 +238,8 @@ async function executeWithdraw(
       return false;
     }
 
-    // Calculer les parametres de gas
-    const gasParams = await calculateGasParams(reserveAddress, amount);
+    // Calculer les parametres de gas (USD-based)
+    const gasParams = calculateGasParamsFromUSD(GAS_MAX_COST_USD, GAS_LIMIT_WITHDRAW, GAS_MIN_PRICE_GWEI);
     if (gasParams === null) {
       return false;
     }
@@ -275,9 +259,17 @@ async function executeWithdraw(
     console.log(`  Transaction confirmee dans le bloc ${receipt.blockNumber}`);
     console.log(`  Status: ${receipt.status === "success" ? "Succes" : "Echec"}`);
 
-    // If withdraw succeeded and DEST_ADDRESS is set, transfer funds
-    if (receipt.status === "success" && DEST_ADDRESS) {
-      await transferToDestination(reserveAddress, amount);
+    if (receipt.status === "success") {
+      // Mise a jour locale des balances apres withdraw reussi
+      userBalances[supplyTokenAddress] = (userBalances[supplyTokenAddress] ?? 0n) - amount;
+      poolLiquidity[reserveAddress] = (poolLiquidity[reserveAddress] ?? 0n) - amount;
+      console.log(`  [Local] Balance ${supplyToken.symbol}: ${formatUnits(userBalances[supplyTokenAddress], supplyToken.decimals)}`);
+      console.log(`  [Local] Liquidite ${stablecoin.symbol}: ${formatUnits(poolLiquidity[reserveAddress], stablecoin.decimals)}`);
+
+      // Transfer to destination if configured
+      if (DEST_ADDRESS) {
+        await transferToDestination(reserveAddress, amount);
+      }
     }
 
     return receipt.status === "success";
@@ -289,7 +281,7 @@ async function executeWithdraw(
 
 /**
  * Transfer stablecoins (USDC or WXDAI) to DEST_ADDRESS.
- * Uses a fixed low gas price (2 gwei) for the transfer.
+ * Uses fixed gas price in Gwei.
  */
 async function transferToDestination(
   tokenAddress: Address,
@@ -309,7 +301,7 @@ async function transferToDestination(
     const amountDisplay = formatUnits(amount, token.decimals);
     console.log(`[Transfer] Envoi de ${amountDisplay} ${token.symbol} vers ${DEST_ADDRESS}...`);
 
-    const gasPrice = parseUnits(GAS_TRANSFER_DEST_GWEI.toString(), 9);
+    const gasPrice = parseUnits(GAS_TRANSFER_PRICE_GWEI.toString(), 9);
 
     const hash = await walletClient.writeContract({
       address: tokenAddress,
@@ -342,7 +334,7 @@ async function withdrawAllAvailable(): Promise<void> {
   console.log("[Withdraw] Verification des positions a retirer...");
 
   for (const [supplyTokenAddress, supplyToken] of Object.entries(SUPPLY_TOKENS)) {
-    const userBalance = initialBalances[supplyTokenAddress as Address] ?? 0n;
+    const userBalance = userBalances[supplyTokenAddress as Address] ?? 0n;
     const liquidity = poolLiquidity[supplyToken.associatedReserve] ?? 0n;
     const stablecoin = TOKENS[supplyToken.associatedReserve];
 
@@ -410,12 +402,13 @@ async function watchRMMEvents() {
 
 function displayConfig() {
   console.log("Configuration:");
-  console.log(`  Min withdraw:       ${MIN_WITHDRAW_USD} $`);
-  console.log(`  Gas price:          ${GAS_PRICE_GWEI} Gwei`);
-  console.log(`  Gas max cost:       ${GAS_MAX_COST_USD > 0 ? `${GAS_MAX_COST_USD} $` : "no limit"}`);
-  console.log(`  DEST_ADDRESS:       ${DEST_ADDRESS ?? "disabled"}`);
+  console.log(`  Min withdraw:        ${MIN_WITHDRAW_USD} $`);
+  console.log(`  Withdraw gas limit:  ${GAS_LIMIT_WITHDRAW}`);
+  console.log(`  Withdraw max cost:   ${GAS_MAX_COST_USD} $`);
+  console.log(`  Min gas price:       ${GAS_MIN_PRICE_GWEI} Gwei`);
+  console.log(`  DEST_ADDRESS:        ${DEST_ADDRESS ?? "disabled"}`);
   if (DEST_ADDRESS) {
-    console.log(`  Gas transfer dest:  ${GAS_TRANSFER_DEST_GWEI} Gwei`);
+    console.log(`  Transfer gas price:  ${GAS_TRANSFER_PRICE_GWEI} Gwei`);
   }
   console.log("---");
 }
