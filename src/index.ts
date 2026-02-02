@@ -5,6 +5,9 @@ import { gnosis } from "viem/chains";
 import { isAddress } from "viem";
 import { RMM_ADDRESS, TOKENS, SUPPLY_TOKENS, REPAY_EVENT_ABI, SUPPLY_EVENT_ABI, ERC20_BALANCE_OF_ABI, WITHDRAW_ABI, ERC20_TRANSFER_ABI } from "./config.js";
 
+// Withdraw configuration from ENV
+const MIN_WITHDRAW_USD = parseFloat(process.env.MIN_WITHDRAW_USD ?? "0.01");
+
 // Gas configuration from ENV
 const GAS_PRICE_GWEI = parseFloat(process.env.GAS_PRICE_GWEI ?? "2");
 const GAS_MAX_COST_USD = parseFloat(process.env.GAS_MAX_COST_USD ?? "0"); // 0 = no limit
@@ -44,10 +47,10 @@ const client = createPublicClient({
 
 const walletClient = account
   ? createWalletClient({
-      account,
-      chain: gnosis,
-      transport: http(),
-    })
+    account,
+    chain: gnosis,
+    transport: http(),
+  })
   : null;
 
 function formatAmount(amount: bigint, reserve: Address): string {
@@ -155,6 +158,19 @@ function calculateWithdrawAmount(userBalance: bigint, poolLiquidity: bigint): bi
 }
 
 /**
+ * Check if withdraw amount meets minimum threshold.
+ * Protection against bots adding small amounts to drain gas fees.
+ */
+function checkMinWithdrawAmount(amount: bigint, decimals: number): boolean {
+  const amountUSD = parseFloat(formatUnits(amount, decimals));
+  if (amountUSD < MIN_WITHDRAW_USD) {
+    console.log(`  [SKIP] Montant (${amountUSD.toFixed(2)} USD) < minimum (${MIN_WITHDRAW_USD} USD)`);
+    return false;
+  }
+  return true;
+}
+
+/**
  * Calculate gas parameters for withdraw transaction.
  * Returns:
  * - GasParams object with configured gas price
@@ -232,6 +248,11 @@ async function executeWithdraw(
     console.log(`[Withdraw] Execution pour ${supplyToken.symbol}...`);
     console.log(`  Reserve: ${stablecoin.symbol}`);
     console.log(`  Montant: ${amountDisplay}`);
+
+    // Verifier le montant minimum
+    if (!checkMinWithdrawAmount(amount, stablecoin.decimals)) {
+      return false;
+    }
 
     // Calculer les parametres de gas
     const gasParams = await calculateGasParams(reserveAddress, amount);
@@ -389,6 +410,7 @@ async function watchRMMEvents() {
 
 function displayConfig() {
   console.log("Configuration:");
+  console.log(`  Min withdraw:       ${MIN_WITHDRAW_USD} $`);
   console.log(`  Gas price:          ${GAS_PRICE_GWEI} Gwei`);
   console.log(`  Gas max cost:       ${GAS_MAX_COST_USD > 0 ? `${GAS_MAX_COST_USD} $` : "no limit"}`);
   console.log(`  DEST_ADDRESS:       ${DEST_ADDRESS ?? "disabled"}`);
