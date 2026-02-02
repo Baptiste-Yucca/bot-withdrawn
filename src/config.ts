@@ -68,4 +68,17 @@ export const WITHDRAW_ABI = [
   },
 ] as const;
 
+export const ERC20_TRANSFER_ABI = [
+  {
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    name: "transfer",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
 export const MAX_UINT256 = 2n ** 256n - 1n;
