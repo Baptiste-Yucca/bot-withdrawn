@@ -203,6 +203,7 @@ function calculateWithdrawAmount(userBalance: bigint, poolLiquidity: bigint): bi
  * Fetch real liquidity from RPC (stablecoin balance in aToken contract)
  */
 async function fetchRealLiquidity(supplyTokenAddress: Address, reserveAddress: Address): Promise<bigint> {
+  const start = performance.now();
   try {
     const balance = await client.readContract({
       address: reserveAddress,
@@ -210,8 +211,10 @@ async function fetchRealLiquidity(supplyTokenAddress: Address, reserveAddress: A
       functionName: "balanceOf",
       args: [supplyTokenAddress],
     });
+    console.log(`  [RPC] duration ${(performance.now() - start).toFixed(0)} ms, end at ${timestamp()}`);
     return balance;
   } catch (error) {
+    console.log(`  [RPC] duration ${(performance.now() - start).toFixed(0)} ms, end at ${timestamp()} (error)`);
     console.error(`  [RPC] Erreur fetch liquidite:`, (error as Error).message);
     return 0n;
   }
