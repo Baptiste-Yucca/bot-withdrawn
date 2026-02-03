@@ -77,7 +77,7 @@ async function tryWithdraw(): Promise<void> {
   await withdrawAllAvailable();
 }
 
-async function handleRepayEvent(reserve: Address, user: Address, repayer: Address, amount: bigint, blockNumber: bigint | null) {
+async function handleRepayEvent(reserve: Address, user: Address, repayer: Address, amount: bigint, useATokens: boolean, blockNumber: bigint | null) {
   if (!isStablecoin(reserve)) return;
 
   const formattedAmount = formatAmount(amount, reserve);
@@ -88,6 +88,13 @@ async function handleRepayEvent(reserve: Address, user: Address, repayer: Addres
   console.log(`  Montant: ${formattedAmount}`);
   console.log(`  User: ${user}`);
   console.log(`  Repayer: ${repayer}`);
+  console.log(`  UseATokens: ${useATokens}`);
+
+  // Skip si repay avec aTokens - pas de nouvelle liquidite ajoutee au pool
+  if (useATokens) {
+    console.log(`  [SKIP] Repay avec aTokens, pas de liquidite ajoutee`);
+    return;
+  }
 
   // Mise a jour locale de la liquidite (+amount car repay ajoute de la liquidite)
   poolLiquidity[reserve] = (poolLiquidity[reserve] ?? 0n) + amount;
@@ -378,6 +385,12 @@ async function withdrawAllAvailable(): Promise<void> {
     console.log(`  ${supplyToken.symbol}: Balance ${formatUnits(userBalance, supplyToken.decimals)}, Liquidite ${formatUnits(liquidity, stablecoin.decimals)}`);
     console.log(`    -> Retrait: ${formatUnits(withdrawAmount, stablecoin.decimals)} ${stablecoin.symbol}`);
 
+    // Skip si montant nul (securite supplementaire)
+    if (withdrawAmount === 0n) {
+      console.log(`    [SKIP] Montant de retrait nul`);
+      continue;
+    }
+
     await executeWithdraw(
       supplyTokenAddress as Address,
       supplyToken.associatedReserve,
@@ -398,9 +411,9 @@ async function watchRMMEvents() {
     eventName: "Repay",
     onLogs: (logs) => {
       for (const log of logs) {
-        const { reserve, user, repayer, amount } = log.args;
-        if (reserve && user && repayer && amount !== undefined) {
-          handleRepayEvent(reserve, user, repayer, amount, log.blockNumber);
+        const { reserve, user, repayer, amount, useATokens } = log.args;
+        if (reserve && user && repayer && amount !== undefined && useATokens !== undefined) {
+          handleRepayEvent(reserve, user, repayer, amount, useATokens, log.blockNumber);
         }
       }
     },
