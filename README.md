@@ -1,6 +1,24 @@
 # Bot Withdrawn
 
-Ce projet est un bot automatisé conçu pour fonctionner sur la Gnosis Chain.
+Bot de retrait automatique de liquidite sur le protocole RMM (Gnosis Chain). Surveille les evenements Repay/Supply pour retirer les stablecoins (USDC, WXDAI) des qu'une opportunite se presente.
+
+## Architecture
+
+> **Event-based (post-bloc)** - Ce bot reagit aux evenements **apres** qu'ils soient mines dans un bloc. Il ne surveille pas le mempool.
+
+```
+Bloc N mine (Repay) → Bot detecte l'event → Tentative withdraw → Bloc N+1
+```
+
+### Limitation MEV
+
+Les bots MEV surveillent le **mempool** et soumettent leurs withdraws dans le **meme bloc** que le repay. Avec une architecture event-based, vous arrivez structurellement 1 bloc trop tard si un bot MEV est actif.
+
+### Axes d'amelioration
+
+- **WebSocket transport** - Reduire la latence vs HTTP polling
+- **Mempool monitoring** - `eth_subscribe("pendingTransactions")` pour reagir sur les pending tx
+- **Private transactions** - Utiliser des relayers MEV pour soumettre sans passer par le mempool public
 
 ## Prérequis
 
