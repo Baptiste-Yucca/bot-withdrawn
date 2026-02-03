@@ -8,6 +8,7 @@ import { RMM_ADDRESS, TOKENS, SUPPLY_TOKENS, REPAY_EVENT_ABI, SUPPLY_EVENT_ABI, 
 // Withdraw configuration from ENV
 const MIN_WITHDRAW_USD = parseFloat(process.env.MIN_WITHDRAW_USD ?? "0.01");
 const REFRESH_INTERVAL_MIN = parseFloat(process.env.REFRESH_INTERVAL_MIN ?? "5");
+const CHECK_LIQUIDITY_BEFORE = process.env.CHECK_LIQUIDITY_BEFORE === "1";
 
 // Gas configuration from ENV (USD-based strategy)
 // gasPrice is computed so that: gasPrice × gasLimit ≤ GAS_MAX_COST_USD
@@ -195,6 +196,24 @@ function calculateWithdrawAmount(userBalance: bigint, poolLiquidity: bigint): bi
 }
 
 /**
+ * Fetch real liquidity from RPC (stablecoin balance in aToken contract)
+ */
+async function fetchRealLiquidity(supplyTokenAddress: Address, reserveAddress: Address): Promise<bigint> {
+  try {
+    const balance = await client.readContract({
+      address: reserveAddress,
+      abi: ERC20_BALANCE_OF_ABI,
+      functionName: "balanceOf",
+      args: [supplyTokenAddress],
+    });
+    return balance;
+  } catch (error) {
+    console.error(`  [RPC] Erreur fetch liquidite:`, (error as Error).message);
+    return 0n;
+  }
+}
+
+/**
  * Check if withdraw amount meets minimum threshold.
  * Protection against bots adding small amounts to drain gas fees.
  */
@@ -266,6 +285,22 @@ async function executeWithdraw(
     // Verifier le montant minimum
     if (!checkMinWithdrawAmount(amount, stablecoin.decimals)) {
       return false;
+    }
+
+    // Verifier la liquidite reelle via RPC (si active)
+    if (CHECK_LIQUIDITY_BEFORE) {
+      const realLiquidity = await fetchRealLiquidity(supplyTokenAddress, reserveAddress);
+      if (realLiquidity === 0n) {
+        console.log(`  [SKIP] Liquidite reelle = 0 (RPC check)`);
+        poolLiquidity[reserveAddress] = 0n; // Sync local state
+        return false;
+      }
+      if (realLiquidity < amount) {
+        console.log(`  [SKIP] Liquidite reelle (${formatUnits(realLiquidity, stablecoin.decimals)}) < montant demande`);
+        poolLiquidity[reserveAddress] = realLiquidity; // Sync local state
+        return false;
+      }
+      console.log(`  [RPC] Liquidite reelle: ${formatUnits(realLiquidity, stablecoin.decimals)} ${stablecoin.symbol}`);
     }
 
     // Calculer les parametres de gas (USD-based)
@@ -455,6 +490,7 @@ function displayConfig() {
   console.log("Configuration:");
   console.log(`  Min withdraw:        ${MIN_WITHDRAW_USD} $`);
   console.log(`  Refresh interval:    ${REFRESH_INTERVAL_MIN} min`);
+  console.log(`  Check liquidity RPC: ${CHECK_LIQUIDITY_BEFORE ? "enabled" : "disabled"}`);
   console.log(`  Withdraw gas limit:  ${GAS_LIMIT_WITHDRAW}`);
   console.log(`  Withdraw max cost:   ${GAS_MAX_COST_USD} $`);
   console.log(`  Min gas price:       ${GAS_MIN_PRICE_GWEI} Gwei`);
