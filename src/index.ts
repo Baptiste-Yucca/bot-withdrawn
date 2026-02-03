@@ -60,6 +60,10 @@ const walletClient = account
   })
   : null;
 
+function timestamp(): string {
+  return new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 function formatAmount(amount: bigint, reserve: Address): string {
   const token = TOKENS[reserve];
   if (token) {
@@ -84,7 +88,7 @@ async function handleRepayEvent(reserve: Address, user: Address, repayer: Addres
   const formattedAmount = formatAmount(amount, reserve);
 
   console.log("---");
-  console.log(`[Repay] Bloc: ${blockNumber}`);
+  console.log(`${timestamp()} [Repay] Bloc: ${blockNumber}`);
   console.log(`  Token: ${reserve}`);
   console.log(`  Montant: ${formattedAmount}`);
   console.log(`  User: ${user}`);
@@ -110,7 +114,7 @@ async function handleSupplyEvent(reserve: Address, user: Address, onBehalfOf: Ad
   const formattedAmount = formatAmount(amount, reserve);
 
   console.log("---");
-  console.log(`[Supply] Bloc: ${blockNumber}`);
+  console.log(`${timestamp()} [Supply] Bloc: ${blockNumber}`);
   console.log(`  Token: ${reserve}`);
   console.log(`  Montant: ${formattedAmount}`);
   console.log(`  User: ${user}`);
@@ -134,7 +138,7 @@ function handleWithdrawEvent(reserve: Address, user: Address, to: Address, amoun
   const formattedAmount = formatAmount(amount, reserve);
 
   console.log("---");
-  console.log(`[Withdraw] Bloc: ${blockNumber}`);
+  console.log(`${timestamp()} [Withdraw] Bloc: ${blockNumber}`);
   console.log(`  Token: ${reserve}`);
   console.log(`  Montant: ${formattedAmount}`);
   console.log(`  User: ${user}`);
@@ -278,7 +282,7 @@ async function executeWithdraw(
   try {
     const amountDisplay = formatUnits(amount, stablecoin.decimals);
 
-    console.log(`[Withdraw] Execution pour ${supplyToken.symbol}...`);
+    console.log(`${timestamp()} [Withdraw] Execution pour ${supplyToken.symbol}...`);
     console.log(`  Reserve: ${stablecoin.symbol}`);
     console.log(`  Montant: ${amountDisplay}`);
 
@@ -364,7 +368,7 @@ async function transferToDestination(
 
   try {
     const amountDisplay = formatUnits(amount, token.decimals);
-    console.log(`[Transfer] Envoi de ${amountDisplay} ${token.symbol} vers ${DEST_ADDRESS}...`);
+    console.log(`${timestamp()} [Transfer] Envoi de ${amountDisplay} ${token.symbol} vers ${DEST_ADDRESS}...`);
 
     const gasPrice = parseUnits(GAS_TRANSFER_PRICE_GWEI.toString(), 9);
 
@@ -396,7 +400,7 @@ async function withdrawAllAvailable(): Promise<void> {
   }
 
   console.log("---");
-  console.log("[Withdraw] Verification des positions a retirer...");
+  console.log(`${timestamp()} [Withdraw] Verification des positions a retirer...`);
 
   for (const [supplyTokenAddress, supplyToken] of Object.entries(SUPPLY_TOKENS)) {
     const userBalance = userBalances[supplyTokenAddress as Address] ?? 0n;
@@ -501,10 +505,28 @@ function displayConfig() {
   console.log("---");
 }
 
+async function displayGasInfo(address: Address) {
+  try {
+    const balance = await client.getBalance({ address });
+    const balanceXDAI = parseFloat(formatUnits(balance, 18));
+    const maxWithdrawAttempts = Math.floor(balanceXDAI / GAS_MAX_COST_USD);
+
+    console.log("Gas Info:");
+    console.log(`  Address:             ${address}`);
+    console.log(`  Balance:             ${balanceXDAI.toFixed(4)} xDAI`);
+    console.log(`  Cost per withdraw:   ${GAS_MAX_COST_USD} xDAI`);
+    console.log(`  Min withdraw attempts: ${maxWithdrawAttempts}`);
+    console.log("---");
+  } catch (error) {
+    console.error("Erreur fetch gas balance:", (error as Error).message);
+  }
+}
+
 async function main() {
   displayConfig();
 
   if (USER_ADDR) {
+    await displayGasInfo(USER_ADDR);
     await fetchAndStoreSupplyTokenBalances(USER_ADDR);
   } else if (process.env.PRIVATE_KEY) {
     console.log("Cle privee invalide, impossible de deriver l'adresse");
@@ -524,9 +546,11 @@ async function main() {
     const intervalMs = REFRESH_INTERVAL_MIN * 60 * 1000;
     setInterval(async () => {
       console.log("---");
-      console.log("[Refresh] Mise a jour periodique des balances...");
+      console.log(`${timestamp()} [Refresh] Mise a jour periodique des balances...`);
       await fetchAndStoreSupplyTokenBalances(USER_ADDR);
+      await displayGasInfo(USER_ADDR);
     }, intervalMs);
+
   }
 }
 
